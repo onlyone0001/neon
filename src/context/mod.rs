@@ -19,6 +19,7 @@ use types::error::JsError;
 use object::{Object, This};
 use object::class::Class;
 use result::{NeonResult, JsResult, Throw};
+use task::TaskBuilder;
 use self::internal::{ContextInternal, Scope, ScopeMetadata};
 
 #[repr(C)]
@@ -334,6 +335,15 @@ pub trait Context<'a>: ContextInternal<'a> {
     fn throw_range_error<S: AsRef<str>, T>(&mut self, msg: S) -> NeonResult<T> {
         let err = JsError::range_error(self, msg)?;
         self.throw(err)
+    }
+
+    fn task<'b, Perform, Complete, Output>(&'b mut self, perform: Perform) -> TaskBuilder<'b, 'a, Self, Perform, Complete, Output>
+    where
+        Perform: FnOnce() -> Complete + Send + 'static,
+        Complete: FnOnce(TaskContext) -> JsResult<Output> + Send + 'static,
+        Output: Value,
+    {
+        TaskBuilder::new(self, perform)
     }
 }
 

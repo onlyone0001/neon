@@ -3,13 +3,34 @@
 use std::marker::{Send, Sized};
 use std::mem;
 use std::os::raw::c_void;
+use std::marker::PhantomData;
 
-use types::{Value, JsFunction};
+use types::{Value, JsFunction, JsUndefined};
 use result::JsResult;
 use handle::{Handle, Managed};
-use context::TaskContext;
+use context::{Context, TaskContext};
 use neon_runtime;
 use neon_runtime::raw;
+
+trait BaseTask: Send + Sized + 'static {
+    type Output: Send + 'static;
+    type JsEvent: Value;
+
+    fn perform(self) -> Self::Output;
+    fn complete<'a>(cx: TaskContext<'a>, result: Self::Output) -> JsResult<Self::JsEvent>;
+
+    fn schedule(self, callback: Handle<JsFunction>) {
+        let boxed_self = Box::new(self);
+        let self_raw = Box::into_raw(boxed_self);
+        let callback_raw = callback.to_raw();
+        unsafe {
+            neon_runtime::task::schedule(mem::transmute(self_raw),
+                                         perform_task::<Self>,
+                                         complete_task::<Self>,
+                                         callback_raw);
+        }
+    }
+}
 
 /// A Rust task that can be executed in a background thread.
 pub trait Task: Send + Sized + 'static {
@@ -36,31 +57,96 @@ pub trait Task: Send + Sized + 'static {
     /// function callback(err, value) {}
     /// ```
     fn schedule(self, callback: Handle<JsFunction>) {
-        let boxed_self = Box::new(self);
-        let self_raw = Box::into_raw(boxed_self);
-        let callback_raw = callback.to_raw();
-        unsafe {
-            neon_runtime::task::schedule(mem::transmute(self_raw),
-                                         perform_task::<Self>,
-                                         complete_task::<Self>,
-                                         callback_raw);
-        }
+        BaseTask::schedule(self, callback)
     }
 }
 
-unsafe extern "C" fn perform_task<T: Task>(task: *mut c_void) -> *mut c_void {
+impl<T: Task> BaseTask for T {
+    type Output = (Result<T::Output, T::Error>, T);
+    type JsEvent = T::JsEvent;
+
+    fn perform(self) -> Self::Output {
+        (Task::perform(&self), self)
+    }
+
+    fn complete<'a>(cx: TaskContext<'a>, output: Self::Output) -> JsResult<Self::JsEvent> {
+        let (result, task) = output;
+
+        task.complete(cx, result)
+    }
+}
+
+unsafe extern "C" fn perform_task<T: BaseTask>(task: *mut c_void) -> *mut c_void {
     let task: Box<T> = Box::from_raw(mem::transmute(task));
     let result = task.perform();
-    Box::into_raw(task);
     mem::transmute(Box::into_raw(Box::new(result)))
 }
 
-unsafe extern "C" fn complete_task<T: Task>(task: *mut c_void, result: *mut c_void, out: &mut raw::Local) {
-    let result: Result<T::Output, T::Error> = *Box::from_raw(mem::transmute(result));
-    let task: Box<T> = Box::from_raw(mem::transmute(task));
+unsafe extern "C" fn complete_task<T: BaseTask>(result: *mut c_void, out: &mut raw::Local) {
+    let result: T::Output = *Box::from_raw(mem::transmute(result));
     TaskContext::with(|cx| {
-        if let Ok(result) = task.complete(cx, result) {
+        if let Ok(result) = T::complete(cx, result) {
             *out = result.to_raw();
         }
     })
+}
+
+struct PerformTask<P>(P);
+
+pub struct TaskBuilder<'a, 'b, C, Perform, Complete, Output>
+where
+    C: Context<'b>,
+    Perform: FnOnce() -> Complete + Send + 'static,
+    Complete: FnOnce(TaskContext) -> JsResult<Output> + Send + 'static,
+    Output: Value,
+{
+    _phantom: PhantomData<&'b C>,
+    context: &'a mut C,
+    task: PerformTask<Perform>,
+}
+
+impl<'a, 'b, C, Perform, Complete, Output> TaskBuilder<'a, 'b, C, Perform, Complete, Output>
+where
+    C: Context<'b>,
+    Perform: FnOnce() -> Complete + Send + 'static,
+    Complete: FnOnce(TaskContext) -> JsResult<Output> + Send + 'static,
+    Output: Value,
+{
+    pub(crate) fn new(context: &'a mut C, perform: Perform) -> Self {
+        Self {
+            _phantom: PhantomData,
+            context,
+            task: PerformTask(perform),
+        }
+    }
+
+    pub fn schedule_task(self, callback: Handle<JsFunction>) {
+        self.task.schedule(callback);
+    }
+
+    pub fn schedule(self, callback: Handle<JsFunction>) -> JsResult<'b, JsUndefined> {
+        let Self { context, task, .. } = self;
+
+        task.schedule(callback);
+
+        Ok(context.undefined())
+    }
+}
+
+impl<Perform, Complete, Output> BaseTask for PerformTask<Perform>
+where
+    Perform: FnOnce() -> Complete + Send + 'static,
+    Complete: for<'c> FnOnce(TaskContext<'c>) -> JsResult<Output> + Send + 'static,
+    Output: Value,
+{
+    type Output = Complete;
+    type JsEvent = Output;
+
+    fn perform(self) -> Complete {
+        (self.0)()
+    }
+
+    fn complete<'a>(cx: TaskContext<'a>, complete: Complete) -> JsResult<Output> {
+        (complete)(cx)
+    }
 }
