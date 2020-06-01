@@ -93,24 +93,20 @@ unsafe extern "C" fn complete_task<T: BaseTask>(result: *mut c_void, out: &mut r
 
 struct PerformTask<P>(P);
 
-pub struct TaskBuilder<'a, 'b, C, Perform, Complete, Output>
+pub struct TaskBuilder<'a, 'b, C, Perform, Output>
 where
     C: Context<'b>,
-    Perform: FnOnce() -> Complete + Send + 'static,
-    Complete: FnOnce(TaskContext) -> JsResult<Output> + Send + 'static,
-    Output: Value,
+    Perform: FnOnce() -> Output + Send + 'static,
 {
     _phantom: PhantomData<&'b C>,
     context: &'a mut C,
     task: PerformTask<Perform>,
 }
 
-impl<'a, 'b, C, Perform, Complete, Output> TaskBuilder<'a, 'b, C, Perform, Complete, Output>
+impl<'a, 'b, C, Perform, Output> TaskBuilder<'a, 'b, C, Perform, Output>
 where
     C: Context<'b>,
-    Perform: FnOnce() -> Complete + Send + 'static,
-    Complete: FnOnce(TaskContext) -> JsResult<Output> + Send + 'static,
-    Output: Value,
+    Perform: FnOnce() -> Output + Send + 'static,
 {
     pub(crate) fn new(context: &'a mut C, perform: Perform) -> Self {
         Self {
@@ -119,7 +115,15 @@ where
             task: PerformTask(perform),
         }
     }
+}
 
+impl<'a, 'b, C, Perform, Complete, Output> TaskBuilder<'a, 'b, C, Perform, Complete>
+where
+    C: Context<'b>,
+    Perform: FnOnce() -> Complete + Send + 'static,
+    Complete: FnOnce(TaskContext) -> JsResult<Output> + Send + 'static,
+    Output: Value,
+{
     pub fn schedule_task(self, callback: Handle<JsFunction>) {
         self.task.schedule(callback);
     }

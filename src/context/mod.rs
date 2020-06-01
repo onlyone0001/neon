@@ -337,11 +337,9 @@ pub trait Context<'a>: ContextInternal<'a> {
         self.throw(err)
     }
 
-    fn task<'b, Perform, Complete, Output>(&'b mut self, perform: Perform) -> TaskBuilder<'b, 'a, Self, Perform, Complete, Output>
+    fn task<'b, Perform, Output>(&'b mut self, perform: Perform) -> TaskBuilder<'b, 'a, Self, Perform, Output>
     where
-        Perform: FnOnce() -> Complete + Send + 'static,
-        Complete: FnOnce(TaskContext) -> JsResult<Output> + Send + 'static,
-        Output: Value,
+        Perform: FnOnce() -> Output + Send + 'static,
     {
         TaskBuilder::new(self, perform)
     }
